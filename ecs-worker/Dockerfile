@@ -15,12 +15,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all Cloud Custodian policies
-COPY policies/ /app/policies/
-
 # Copy the worker application
 COPY worker.py /app/
-COPY policy_selector.py /app/
 
 # Create output directory
 RUN mkdir -p /app/output
