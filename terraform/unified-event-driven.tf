@@ -588,61 +588,64 @@ resource "aws_ecs_task_definition" "worker" {
   }
 }
 
-  # ECS Service with auto-scaling (scales to 0 when idle)
-  resource "aws_ecs_service" "worker" {
-    count           = var.enable_ecs_worker ? 1 : 0
-    name            = "${var.project_name}-worker-${var.environment}"
-    cluster         = aws_ecs_cluster.main[0].id
-    task_definition = aws_ecs_task_definition.worker[0].arn
-    desired_count   = 0  # Start with 0 tasks, scale up based on SQS queue depth
-    launch_type     = "FARGATE"
-    
-    network_configuration {
-      subnets          = data.aws_subnets.default.ids
-      security_groups  = [aws_security_group.ecs_worker[0].id]
-      assign_public_ip = true  # Required for Fargate in public subnets
-    }
-    
-    deployment_configuration {
-      maximum_percent         = 200
-      minimum_healthy_percent = 100
-    }
-    
-    enable_execute_command = true
-    
-    tags = {
-      Name        = "${var.project_name}-worker-${var.environment}"
-      Environment = var.environment
-      ManagedBy   = "Terraform"
-      Purpose     = "Auto-scaling worker for Cloud Custodian policies"
-    }
+# ============================================================================
+# ECS SERVICE (Auto-scaling from 0)
+# ============================================================================
+
+resource "aws_ecs_service" "worker" {
+  count           = var.enable_ecs_worker ? 1 : 0
+  name            = "${var.project_name}-worker-${var.environment}"
+  cluster         = aws_ecs_cluster.main[0].id
+  task_definition = aws_ecs_task_definition.worker[0].arn
+  desired_count   = 0  # Start with 0 tasks, scale up based on SQS queue depth
+  launch_type     = "FARGATE"
+  
+  network_configuration {
+    subnets          = data.aws_subnets.default.ids
+    security_groups  = [aws_security_group.ecs_worker[0].id]
+    assign_public_ip = true  # Required for Fargate in public subnets
   }
   
-  # Application Auto Scaling Target
-  resource "aws_appautoscaling_target" "ecs_target" {
-    count              = var.enable_ecs_worker ? 1 : 0
-    max_capacity       = 10  # Maximum number of tasks
-    min_capacity       = 0   # Can scale down to 0
-    resource_id        = "service/${aws_ecs_cluster.main[0].name}/${aws_ecs_service.worker[0].name}"
-    scalable_dimension = "ecs:service:DesiredCount"
-    service_namespace  = "ecs"
+  deployment_configuration {
+    maximum_percent         = 200
+    minimum_healthy_percent = 100
   }
   
-  # Auto Scaling Policy - Scale based on SQS Queue Depth
-  resource "aws_appautoscaling_policy" "ecs_policy_scale_up" {
-    count              = var.enable_ecs_worker ? 1 : 0
-    name               = "${var.project_name}-scale-up-${var.environment}"
-    policy_type        = "TargetTrackingScaling"
-    resource_id        = aws_appautoscaling_target.ecs_target[0].resource_id
-    scalable_dimension = aws_appautoscaling_target.ecs_target[0].scalable_dimension
-    service_namespace  = aws_appautoscaling_target.ecs_target[0].service_namespace
-    
-    target_tracking_scaling_policy_configuration {
-      target_value       = 5.0  # Target 5 messages per task
-      scale_in_cooldown  = 300  # Wait 5 minutes before scaling down
-      scale_out_cooldown = 60   # Wait 1 minute before scaling up again
-      
-      customized_metric_specification {
+  enable_execute_command = true
+  
+  tags = {
+    Name        = "${var.project_name}-worker-${var.environment}"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+    Purpose     = "Auto-scaling worker for Cloud Custodian policies"
+  }
+}# ============================================================================
+# ECS AUTO-SCALING
+# ============================================================================
+
+# Application Auto Scaling Target
+resource "aws_appautoscaling_target" "ecs_target" {
+  count              = var.enable_ecs_worker ? 1 : 0
+  max_capacity       = 10  # Maximum number of tasks
+  min_capacity       = 0   # Can scale down to 0
+  resource_id        = "service/${aws_ecs_cluster.main[0].name}/${aws_ecs_service.worker[0].name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+# Auto Scaling Policy - Scale based on SQS Queue Depth
+resource "aws_appautoscaling_policy" "ecs_policy_scale_up" {
+  count              = var.enable_ecs_worker ? 1 : 0
+  name               = "${var.project_name}-scale-up-${var.environment}"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs_target[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_target[0].scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs_target[0].service_namespace
+  
+  target_tracking_scaling_policy_configuration {
+    target_value       = 5.0  # Target 5 messages per task
+    scale_in_cooldown  = 300  # Wait 5 minutes before scaling down
+    scale_out_cooldown = 60   # Wait 1 minute before scaling up again      customized_metric_specification {
         metric_name = "ApproximateNumberOfMessagesVisible"
         namespace   = "AWS/SQS"
         statistic   = "Average"
