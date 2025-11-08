@@ -119,7 +119,7 @@ resource "aws_s3_bucket" "custodian_bucket" {
   
   tags = {
     Name        = "Cloud Custodian Unified Bucket"
-    Purpose     = "Policies, policy mappings, events, outputs"
+    Purpose     = "Policy storage and outputs"
     Environment = var.environment
   }
 }
