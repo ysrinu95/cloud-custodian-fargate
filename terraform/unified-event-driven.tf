@@ -590,16 +590,17 @@ resource "aws_ecs_task_definition" "worker" {
 
   # ECS Service with auto-scaling (scales to 0 when idle)
   resource "aws_ecs_service" "worker" {
+    count           = var.enable_ecs_worker ? 1 : 0
     name            = "${var.project_name}-worker-${var.environment}"
-    cluster         = aws_ecs_cluster.custodian.id
-    task_definition = aws_ecs_task_definition.custodian_worker.arn
+    cluster         = aws_ecs_cluster.main[0].id
+    task_definition = aws_ecs_task_definition.worker[0].arn
     desired_count   = 0  # Start with 0 tasks, scale up based on SQS queue depth
     launch_type     = "FARGATE"
     
     network_configuration {
-      subnets          = aws_subnet.private[*].id
-      security_groups  = [aws_security_group.fargate_worker.id]
-      assign_public_ip = true  # Required for Fargate in private subnet without NAT
+      subnets          = data.aws_subnets.default.ids
+      security_groups  = [aws_security_group.ecs_worker[0].id]
+      assign_public_ip = true  # Required for Fargate in public subnets
     }
     
     deployment_configuration {
@@ -619,20 +620,22 @@ resource "aws_ecs_task_definition" "worker" {
   
   # Application Auto Scaling Target
   resource "aws_appautoscaling_target" "ecs_target" {
+    count              = var.enable_ecs_worker ? 1 : 0
     max_capacity       = 10  # Maximum number of tasks
     min_capacity       = 0   # Can scale down to 0
-    resource_id        = "service/${aws_ecs_cluster.custodian.name}/${aws_ecs_service.worker.name}"
+    resource_id        = "service/${aws_ecs_cluster.main[0].name}/${aws_ecs_service.worker[0].name}"
     scalable_dimension = "ecs:service:DesiredCount"
     service_namespace  = "ecs"
   }
   
   # Auto Scaling Policy - Scale based on SQS Queue Depth
   resource "aws_appautoscaling_policy" "ecs_policy_scale_up" {
+    count              = var.enable_ecs_worker ? 1 : 0
     name               = "${var.project_name}-scale-up-${var.environment}"
     policy_type        = "TargetTrackingScaling"
-    resource_id        = aws_appautoscaling_target.ecs_target.resource_id
-    scalable_dimension = aws_appautoscaling_target.ecs_target.scalable_dimension
-    service_namespace  = aws_appautoscaling_target.ecs_target.service_namespace
+    resource_id        = aws_appautoscaling_target.ecs_target[0].resource_id
+    scalable_dimension = aws_appautoscaling_target.ecs_target[0].scalable_dimension
+    service_namespace  = aws_appautoscaling_target.ecs_target[0].service_namespace
     
     target_tracking_scaling_policy_configuration {
       target_value       = 5.0  # Target 5 messages per task
@@ -646,7 +649,7 @@ resource "aws_ecs_task_definition" "worker" {
         
         dimensions {
           name  = "QueueName"
-          value = aws_sqs_queue.findings_queue.name
+          value = aws_sqs_queue.custodian_queue.name
         }
       }
     }
