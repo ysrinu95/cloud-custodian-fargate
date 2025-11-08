@@ -137,7 +137,7 @@ jobs:
             --delete
           
           echo "📦 Uploading config to S3..."
-          aws s3 cp config/policy-mappings.yml "s3://${S3_BUCKET}/config/policy-mappings.yml"
+          aws s3 cp config/policy-mappings.json "s3://${S3_BUCKET}/config/policy-mappings.json"
           
           echo "✓ Policies and config uploaded to S3"
       
