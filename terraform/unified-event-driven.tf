@@ -189,11 +189,13 @@ output "aws_region" {
 # - EventBridge Rules
 # - CloudWatch Log Groups
 #
-# Only S3 bucket remains for policy storage
+# Resources are now active below (uncommented)
 # ============================================================================
 
-/*
-# OLD CODE REMOVED - SQS Queue
+# ============================================================================
+# SQS QUEUE - Security Findings Queue
+# ============================================================================
+
 resource "aws_sqs_queue" "custodian_dlq" {
   name                      = "${var.project_name}-dlq"
   message_retention_seconds = 1209600  # 14 days
