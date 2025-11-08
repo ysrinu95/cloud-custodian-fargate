@@ -5,9 +5,9 @@
 # ============================================================================
 
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.0"
   
-  # S3 Backend for Remote State
+  # S3 Backend for Remote State (no DynamoDB locking)
   backend "s3" {
     bucket  = "ysr95-cloud-custodian-tf-bkt"
     key     = "terraform/unified-event-driven/terraform.tfstate"
@@ -18,7 +18,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.45"
+      version = "~> 5.0"
     }
   }
 }
