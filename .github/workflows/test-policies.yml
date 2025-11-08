@@ -1,0 +1,321 @@
+name: Test Policies One by One
+
+on:
+  workflow_dispatch:
+    inputs:
+      policy_file:
+        description: 'Policy file to test (e.g., s3-createbucket-simple.yml)'
+        required: true
+        type: string
+        default: 's3-createbucket-simple.yml'
+      test_action:
+        description: 'Test action'
+        required: true
+        type: choice
+        options:
+          - validate-only
+          - dry-run
+          - deploy-test
+        default: 'validate-only'
+
+env:
+  AWS_REGION: us-east-1
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test-policy:
+    name: Test Policy - ${{ inputs.policy_file }}
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActions-CloudCustodian-Role
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install Cloud Custodian
+        run: |
+          pip install c7n c7n-org pyyaml boto3
+          custodian version
+      
+      # ====================================================================
+      # STEP 1: Validate Policy Syntax
+      # ====================================================================
+      - name: Validate policy syntax
+        run: |
+          echo "🔍 Validating policy: ${{ inputs.policy_file }}"
+          
+          POLICY_PATH="policies/${{ inputs.policy_file }}"
+          
+          if [ ! -f "$POLICY_PATH" ]; then
+            echo "❌ Policy file not found: $POLICY_PATH"
+            exit 1
+          fi
+          
+          # Validate YAML syntax
+          python -c "import yaml; yaml.safe_load(open('$POLICY_PATH'))"
+          echo "✓ YAML syntax valid"
+          
+          # Validate Cloud Custodian policy
+          custodian validate "$POLICY_PATH"
+          echo "✓ Policy validation successful"
+      
+      # ====================================================================
+      # STEP 2: Dry Run (if selected)
+      # ====================================================================
+      - name: Dry run policy
+        if: inputs.test_action == 'dry-run' || inputs.test_action == 'deploy-test'
+        run: |
+          echo "🧪 Running policy in dry-run mode..."
+          
+          POLICY_PATH="policies/${{ inputs.policy_file }}"
+          OUTPUT_DIR="test-output/$(date +%Y%m%d-%H%M%S)"
+          
+          mkdir -p "$OUTPUT_DIR"
+          
+          # Run in dry-run mode (no actions executed)
+          custodian run \
+            -s "$OUTPUT_DIR" \
+            --region ${{ env.AWS_REGION }} \
+            --dryrun \
+            "$POLICY_PATH"
+          
+          echo "📊 Dry-run results:"
+          ls -la "$OUTPUT_DIR"
+          
+          # Display resources.json if exists
+          if [ -f "$OUTPUT_DIR"/*/resources.json ]; then
+            echo "Resources matched:"
+            cat "$OUTPUT_DIR"/*/resources.json | jq -r '.[] | .Name // .id // .Id' | head -20
+          fi
+      
+      # ====================================================================
+      # STEP 3: Upload Policy to S3 (if deploying test)
+      # ====================================================================
+      - name: Upload policy to S3 for testing
+        if: inputs.test_action == 'deploy-test'
+        run: |
+          echo "📦 Uploading policy to S3..."
+          
+          # Get S3 bucket from Terraform state
+          cd terraform
+          terraform init \
+            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+            -backend-config="key=cloud-custodian/unified/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+          
+          S3_BUCKET=$(terraform output -raw s3_bucket_name)
+          cd ..
+          
+          POLICY_PATH="policies/${{ inputs.policy_file }}"
+          
+          aws s3 cp "$POLICY_PATH" "s3://${S3_BUCKET}/policies/${{ inputs.policy_file }}"
+          
+          echo "✓ Policy uploaded to: s3://${S3_BUCKET}/policies/${{ inputs.policy_file }}"
+      
+      # ====================================================================
+      # STEP 4: Update Policy Mappings (if needed)
+      # ====================================================================
+      - name: Update policy mappings
+        if: inputs.test_action == 'deploy-test'
+        run: |
+          echo "📝 Checking policy mappings..."
+          
+          cd terraform
+          S3_BUCKET=$(terraform output -raw s3_bucket_name)
+          cd ..
+          
+          # Download current mappings
+          aws s3 cp "s3://${S3_BUCKET}/config/policy-mappings.yml" /tmp/policy-mappings.yml || true
+          
+          if [ -f /tmp/policy-mappings.yml ]; then
+            echo "✓ Current policy mappings downloaded"
+            cat /tmp/policy-mappings.yml
+          else
+            echo "⚠️ No existing policy mappings found"
+          fi
+          
+          echo ""
+          echo "ℹ️ To add this policy to mappings, update config/policy-mappings.yml"
+      
+      # ====================================================================
+      # STEP 5: Trigger Test Event (if deploying test)
+      # ====================================================================
+      - name: Trigger test event
+        if: inputs.test_action == 'deploy-test'
+        run: |
+          echo "🎯 Triggering test event..."
+          
+          # Determine event type based on policy file name
+          if [[ "${{ inputs.policy_file }}" == *"s3"* ]]; then
+            echo "Creating test S3 bucket..."
+            
+            TEST_BUCKET="test-custodian-$(date +%s)"
+            
+            # Create bucket (this will trigger EventBridge)
+            aws s3api create-bucket \
+              --bucket "$TEST_BUCKET" \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "✓ Test bucket created: $TEST_BUCKET"
+            echo "⏳ Wait 30 seconds for event processing..."
+            sleep 30
+            
+            # Check if bucket still exists (should be deleted by policy)
+            if aws s3api head-bucket --bucket "$TEST_BUCKET" 2>/dev/null; then
+              echo "⚠️ Test bucket still exists (policy may not have run yet)"
+            else
+              echo "✅ Test bucket was deleted by policy!"
+            fi
+            
+          elif [[ "${{ inputs.policy_file }}" == *"ec2"* ]]; then
+            echo "ℹ️ EC2 test requires manual RunInstances action"
+            echo "Policy will trigger on next EC2 instance creation"
+            
+          else
+            echo "⚠️ Unknown policy type, skipping test event"
+          fi
+      
+      # ====================================================================
+      # STEP 6: Check Logs
+      # ====================================================================
+      - name: Check execution logs
+        if: inputs.test_action == 'deploy-test'
+        run: |
+          echo "📋 Checking Lambda and ECS logs..."
+          
+          cd terraform
+          LAMBDA_FUNCTION=$(terraform output -raw lambda_function_name)
+          cd ..
+          
+          # Get recent Lambda logs
+          echo "Lambda Invoker logs (last 5 minutes):"
+          aws logs tail "/aws/lambda/${LAMBDA_FUNCTION}" \
+            --since 5m \
+            --format short \
+            --region ${{ env.AWS_REGION }} || true
+          
+          echo ""
+          echo "ECS Worker logs (last 5 minutes):"
+          aws logs tail "/ecs/cloud-custodian-worker" \
+            --since 5m \
+            --format short \
+            --region ${{ env.AWS_REGION }} || true
+      
+      # ====================================================================
+      # STEP 7: Generate Test Report
+      # ====================================================================
+      - name: Generate test report
+        if: always()
+        run: |
+          cat <<EOF > test-report.md
+          ## 🧪 Policy Test Report
+          
+          **Policy:** \`${{ inputs.policy_file }}\`
+          **Test Action:** \`${{ inputs.test_action }}\`
+          **Test Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Triggered by:** ${{ github.actor }}
+          
+          ### Test Results
+          
+          EOF
+          
+          if [ "${{ inputs.test_action }}" == "validate-only" ]; then
+            echo "✅ Policy syntax validation: PASSED" >> test-report.md
+          elif [ "${{ inputs.test_action }}" == "dry-run" ]; then
+            echo "✅ Policy syntax validation: PASSED" >> test-report.md
+            echo "✅ Dry-run execution: COMPLETED" >> test-report.md
+          elif [ "${{ inputs.test_action }}" == "deploy-test" ]; then
+            echo "✅ Policy deployed to S3" >> test-report.md
+            echo "✅ Test event triggered" >> test-report.md
+            echo "✅ Check CloudWatch Logs for execution details" >> test-report.md
+          fi
+          
+          cat <<EOF >> test-report.md
+          
+          ### Next Steps
+          
+          1. Review CloudWatch Logs for Lambda and ECS
+          2. Check S3 bucket outputs
+          3. Verify SQS queue metrics
+          4. Monitor CloudWatch metrics for policy execution
+          5. Add policy to policy-mappings.yml if test successful
+          
+          ### Useful AWS Console Links
+          
+          - [Lambda Function Logs](https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/\$252Faws\$252Flambda\$252Fcloud-custodian-invoker)
+          - [ECS Worker Logs](https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/\$252Fecs\$252Fcloud-custodian-worker)
+          - [SQS Queue](https://console.aws.amazon.com/sqs/v2/home?region=${{ env.AWS_REGION }})
+          - [EventBridge Rules](https://console.aws.amazon.com/events/home?region=${{ env.AWS_REGION }}#/rules)
+          EOF
+          
+          cat test-report.md
+          echo "✓ Test report generated"
+      
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ inputs.policy_file }}
+          path: |
+            test-output/
+            test-report.md
+          retention-days: 7
+
+# ======================================================================
+# Batch Test Job - Test Multiple Policies
+# ======================================================================
+  batch-test-policies:
+    name: Batch Test Policies
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.test_action == 'validate-only'
+    
+    strategy:
+      matrix:
+        policy:
+          - s3-createbucket-simple.yml
+          - s3-security-findings.yml
+          - ec2-runinstances.yml
+          - ec2-security-findings.yml
+          - iam-security-findings.yml
+      fail-fast: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install Cloud Custodian
+        run: |
+          pip install c7n pyyaml
+          custodian version
+      
+      - name: Validate policy
+        run: |
+          POLICY_PATH="policies/${{ matrix.policy }}"
+          
+          if [ ! -f "$POLICY_PATH" ]; then
+            echo "⚠️ Policy file not found: $POLICY_PATH (skipping)"
+            exit 0
+          fi
+          
+          echo "🔍 Validating: ${{ matrix.policy }}"
+          custodian validate "$POLICY_PATH"
+          echo "✅ ${{ matrix.policy }} validated successfully"

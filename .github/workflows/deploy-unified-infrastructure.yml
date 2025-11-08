@@ -1,0 +1,288 @@
+name: Deploy Unified Event-Driven Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/unified-event-driven.tf'
+      - 'lambda/**'
+      - 'ecs-worker/**'
+      - 'config/**'
+      - 'policies/**'
+      - '.github/workflows/deploy-unified-infrastructure.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+        default: 'plan'
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: "1.6"
+  PYTHON_VERSION: "3.11"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-infrastructure:
+    name: Deploy Unified Infrastructure
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActions-CloudCustodian-Role
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      # ====================================================================
+      # STEP 1: Package Lambda Function
+      # ====================================================================
+      - name: Package Lambda function
+        run: |
+          cd lambda
+          pip install -r requirements.txt -t .
+          zip -r lambda-function.zip .
+          echo "✓ Lambda package created: lambda-function.zip"
+      
+      # ====================================================================
+      # STEP 2: Terraform Init & Plan
+      # ====================================================================
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+            -backend-config="key=cloud-custodian/unified/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+      
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+      
+      - name: Terraform Plan
+        id: plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="environment=production" \
+            -var="enable_ecs_worker=true" \
+            -out=tfplan \
+            -no-color
+      
+      # ====================================================================
+      # STEP 3: Terraform Apply (if not just planning)
+      # ====================================================================
+      - name: Terraform Apply
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        working-directory: terraform
+        run: |
+          terraform apply -auto-approve tfplan
+          echo "✓ Infrastructure deployed successfully"
+      
+      # ====================================================================
+      # STEP 4: Get Terraform Outputs
+      # ====================================================================
+      - name: Get Terraform outputs
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        id: outputs
+        working-directory: terraform
+        run: |
+          echo "s3_bucket=$(terraform output -raw s3_bucket_name)" >> $GITHUB_OUTPUT
+          echo "ecr_repository=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+          echo "sqs_queue_url=$(terraform output -raw sqs_queue_url)" >> $GITHUB_OUTPUT
+          echo "lambda_function=$(terraform output -raw lambda_function_name)" >> $GITHUB_OUTPUT
+      
+      # ====================================================================
+      # STEP 5: Upload Policies and Config to S3
+      # ====================================================================
+      - name: Upload policies and config to S3
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          S3_BUCKET="${{ steps.outputs.outputs.s3_bucket }}"
+          
+          echo "📦 Uploading policies to S3..."
+          aws s3 sync policies/ "s3://${S3_BUCKET}/policies/" \
+            --exclude "*" \
+            --include "*.yml" \
+            --delete
+          
+          echo "📦 Uploading config to S3..."
+          aws s3 cp config/policy-mappings.yml "s3://${S3_BUCKET}/config/policy-mappings.yml"
+          
+          echo "✓ Policies and config uploaded to S3"
+      
+      # ====================================================================
+      # STEP 6: Build and Push Docker Image (if ECS enabled)
+      # ====================================================================
+      - name: Build and push ECS worker image
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          ECR_REPOSITORY="${{ steps.outputs.outputs.ecr_repository }}"
+          
+          if [ -z "$ECR_REPOSITORY" ] || [ "$ECR_REPOSITORY" == "null" ]; then
+            echo "⚠️ ECS worker is disabled, skipping Docker build"
+            exit 0
+          fi
+          
+          echo "🐳 Building Docker image..."
+          cd ecs-worker
+          
+          # Login to ECR
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
+            docker login --username AWS --password-stdin "$ECR_REPOSITORY"
+          
+          # Build image
+          docker build -t cloud-custodian-worker:latest .
+          
+          # Tag image
+          docker tag cloud-custodian-worker:latest "${ECR_REPOSITORY}:latest"
+          docker tag cloud-custodian-worker:latest "${ECR_REPOSITORY}:${GITHUB_SHA::7}"
+          
+          # Push image
+          docker push "${ECR_REPOSITORY}:latest"
+          docker push "${ECR_REPOSITORY}:${GITHUB_SHA::7}"
+          
+          echo "✓ Docker image pushed to ECR"
+      
+      # ====================================================================
+      # STEP 7: Update ECS Service (force new deployment)
+      # ====================================================================
+      - name: Update ECS service
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          ECS_CLUSTER=$(terraform -chdir=terraform output -raw ecs_cluster_name)
+          ECS_SERVICE=$(terraform -chdir=terraform output -raw ecs_service_name)
+          
+          if [ -z "$ECS_CLUSTER" ] || [ "$ECS_CLUSTER" == "null" ]; then
+            echo "⚠️ ECS worker is disabled, skipping service update"
+            exit 0
+          fi
+          
+          echo "🔄 Forcing ECS service update..."
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✓ ECS service updated"
+      
+      # ====================================================================
+      # STEP 8: Generate deployment summary
+      # ====================================================================
+      - name: Generate deployment summary
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+        run: |
+          cat <<EOF > deployment-summary.md
+          ## 🚀 Unified Event-Driven Infrastructure Deployment
+          
+          **Deployment Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Commit SHA:** ${GITHUB_SHA::7}
+          **Triggered by:** ${{ github.actor }}
+          
+          ### Infrastructure Components
+          
+          - **S3 Bucket:** \`${{ steps.outputs.outputs.s3_bucket }}\`
+          - **SQS Queue:** \`${{ steps.outputs.outputs.sqs_queue_url }}\`
+          - **Lambda Function:** \`${{ steps.outputs.outputs.lambda_function }}\`
+          - **ECR Repository:** \`${{ steps.outputs.outputs.ecr_repository }}\`
+          
+          ### EventBridge Rules
+          
+          - ✅ Unified Security Findings (SecurityHub, GuardDuty, Macie, Config, CloudTrail, Access Analyzer)
+          - ✅ S3 CloudTrail Events (CreateBucket, PutBucketPolicy, PutBucketAcl)
+          - ✅ EC2 CloudTrail Events (RunInstances)
+          
+          ### Architecture Flow
+          
+          \`\`\`
+          Event Sources → EventBridge (Unified Rule) → Lambda Invoker → SQS → ECS Fargate Worker → S3 Outputs
+          \`\`\`
+          
+          ### Next Steps
+          
+          1. Test the framework with a simple policy
+          2. Monitor CloudWatch Logs for Lambda and ECS
+          3. Check S3 bucket for execution outputs
+          4. Add more policies incrementally
+          EOF
+          
+          cat deployment-summary.md
+          echo "✓ Deployment completed successfully!"
+  
+  # ======================================================================
+  # Destroy Job (Manual Only)
+  # ======================================================================
+  destroy-infrastructure:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActions-CloudCustodian-Role
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+            -backend-config="key=cloud-custodian/unified/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+      
+      - name: Terraform Destroy
+        working-directory: terraform
+        run: |
+          echo "⚠️ Destroying infrastructure..."
+          terraform destroy -auto-approve \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="environment=production"
+          
+          echo "✓ Infrastructure destroyed"

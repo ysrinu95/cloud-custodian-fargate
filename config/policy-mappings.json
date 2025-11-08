@@ -1,0 +1,70 @@
+{
+  "version": "1.0",
+  "description": "Dynamic policy mapping configuration for Cloud Custodian",
+  "default_policy": "policies/s3-createbucket.yml",
+  "mappings": [
+    {
+      "name": "S3 Bucket Creation",
+      "description": "Triggered when S3 buckets are created via API",
+      "source": ["aws.s3", "cloudtrail"],
+      "resource_type": ["S3"],
+      "event_name": ["CreateBucket"],
+      "policy_file": "policies/s3-createbucket.yml",
+      "priority": "high"
+    },
+    {
+      "name": "S3 Bucket Policy Changes",
+      "description": "Triggered when bucket policies or ACLs are modified",
+      "source": ["aws.s3", "cloudtrail"],
+      "resource_type": ["S3"],
+      "event_name": ["PutBucketPolicy", "PutBucketAcl", "DeleteBucketPolicy", "PutBucketPublicAccessBlock", "DeleteBucketPublicAccessBlock"],
+      "policy_file": "policies/s3-createbucket.yml",
+      "priority": "high"
+    },
+    {
+      "name": "S3 Security Hub Findings",
+      "description": "Security Hub findings related to S3 buckets",
+      "source": ["securityhub"],
+      "resource_type": ["S3", "S3BUCKET"],
+      "finding_type": ["*public*", "*encryption*", "*policy*", "*versioning*", "*logging*"],
+      "policy_file": "policies/s3-createbucket.yml",
+      "priority": "critical"
+    },
+    {
+      "name": "S3 Access Analyzer Findings",
+      "description": "Access Analyzer findings for publicly accessible S3 buckets",
+      "source": ["access-analyzer"],
+      "resource_type": ["S3", "S3BUCKET"],
+      "finding_type": ["*"],
+      "policy_file": "policies/s3-createbucket.yml",
+      "priority": "critical"
+    },
+    {
+      "name": "S3 Macie Findings",
+      "description": "Macie findings for S3 data exposure",
+      "source": ["macie"],
+      "resource_type": ["S3", "S3BUCKET"],
+      "finding_type": ["*"],
+      "policy_file": "policies/s3-createbucket.yml",
+      "priority": "high"
+    },
+    {
+      "name": "S3 GuardDuty Findings",
+      "description": "GuardDuty findings related to S3 buckets",
+      "source": ["guardduty"],
+      "resource_type": ["S3", "S3BUCKET"],
+      "finding_type": ["*policy*", "*stealth*", "*public*"],
+      "policy_file": "policies/s3-createbucket.yml",
+      "priority": "high"
+    },
+    {
+      "name": "S3 Config Compliance",
+      "description": "AWS Config compliance findings for S3",
+      "source": ["config"],
+      "resource_type": ["S3", "S3BUCKET"],
+      "finding_type": ["s3-*", "*"],
+      "policy_file": "policies/s3-createbucket.yml",
+      "priority": "medium"
+    }
+  ]
+}

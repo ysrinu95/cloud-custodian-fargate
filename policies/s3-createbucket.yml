@@ -1,0 +1,22 @@
+# Cloud Custodian Policy for S3 CreateBucket Events
+# This policy is triggered when S3 buckets are created
+# NO mode block - runs in batch mode and deletes public S3 buckets
+
+policies:
+  - name: s3-delete-public-buckets
+    resource: aws.s3
+    description: Delete S3 buckets that are publicly accessible via bucket policy or ACL
+    filters:
+      - or:
+          # Check for public ACLs
+          - type: value
+            key: Acl.Grants[].Grantee.URI
+            value: "http://acs.amazonaws.com/groups/global/AllUsers"
+            op: contains
+          # Check for public bucket policies
+          - type: has-statement
+            statements:
+              - Effect: Allow
+                Principal: '*'
+    actions:
+      - type: delete
