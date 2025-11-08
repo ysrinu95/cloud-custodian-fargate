@@ -645,18 +645,20 @@ resource "aws_appautoscaling_policy" "ecs_policy_scale_up" {
   target_tracking_scaling_policy_configuration {
     target_value       = 5.0  # Target 5 messages per task
     scale_in_cooldown  = 300  # Wait 5 minutes before scaling down
-    scale_out_cooldown = 60   # Wait 1 minute before scaling up again      customized_metric_specification {
-        metric_name = "ApproximateNumberOfMessagesVisible"
-        namespace   = "AWS/SQS"
-        statistic   = "Average"
-        
-        dimensions {
-          name  = "QueueName"
-          value = aws_sqs_queue.custodian_queue.name
-        }
+    scale_out_cooldown = 60   # Wait 1 minute before scaling up again
+    
+    customized_metric_specification {
+      metric_name = "ApproximateNumberOfMessagesVisible"
+      namespace   = "AWS/SQS"
+      statistic   = "Average"
+      
+      dimensions {
+        name  = "QueueName"
+        value = aws_sqs_queue.custodian_queue.name
       }
     }
   }
+}
 
 # ============================================================================
 # SECURITY GROUP - ECS Worker
