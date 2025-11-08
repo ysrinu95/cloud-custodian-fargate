@@ -110,15 +110,21 @@ jobs:
         run: |
           echo "📦 Uploading policy to S3..."
           
-          # Get S3 bucket from Terraform state
-          cd terraform
-          terraform init \
-            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
-            -backend-config="key=cloud-custodian/unified/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}"
+          # Get S3 bucket name from CloudFormation or use environment variable
+          S3_BUCKET="${{ secrets.CUSTODIAN_BUCKET_NAME }}"
           
-          S3_BUCKET=$(terraform output -raw s3_bucket_name)
-          cd ..
+          if [ -z "$S3_BUCKET" ]; then
+            # Try to find bucket by name pattern
+            S3_BUCKET=$(aws s3api list-buckets --query "Buckets[?contains(Name, 'custodian')].Name | [0]" --output text)
+          fi
+          
+          if [ -z "$S3_BUCKET" ] || [ "$S3_BUCKET" == "None" ]; then
+            echo "❌ ERROR: Could not find S3 bucket"
+            echo "Please set CUSTODIAN_BUCKET_NAME secret in GitHub or deploy infrastructure first"
+            exit 1
+          fi
+          
+          echo "Using S3 bucket: $S3_BUCKET"
           
           POLICY_PATH="policies/${{ inputs.policy_file }}"
           
@@ -134,9 +140,14 @@ jobs:
         run: |
           echo "📝 Checking policy mappings..."
           
-          cd terraform
-          S3_BUCKET=$(terraform output -raw s3_bucket_name)
-          cd ..
+          # Get S3 bucket name
+          S3_BUCKET="${{ secrets.CUSTODIAN_BUCKET_NAME }}"
+          
+          if [ -z "$S3_BUCKET" ]; then
+            S3_BUCKET=$(aws s3api list-buckets --query "Buckets[?contains(Name, 'custodian')].Name | [0]" --output text)
+          fi
+          
+          echo "Using S3 bucket: $S3_BUCKET"
           
           # Download current mappings (note: it's .json not .yml)
           aws s3 cp "s3://${S3_BUCKET}/config/policy-mappings.json" /tmp/policy-mappings.json || true
@@ -197,9 +208,14 @@ jobs:
         run: |
           echo "📋 Checking Lambda and ECS logs..."
           
-          cd terraform
-          LAMBDA_FUNCTION=$(terraform output -raw lambda_function_name)
-          cd ..
+          # Get Lambda function name
+          LAMBDA_FUNCTION="${{ secrets.LAMBDA_FUNCTION_NAME }}"
+          
+          if [ -z "$LAMBDA_FUNCTION" ]; then
+            LAMBDA_FUNCTION=$(aws lambda list-functions --query "Functions[?contains(FunctionName, 'custodian')].FunctionName | [0]" --output text --region ${{ env.AWS_REGION }})
+          fi
+          
+          echo "Using Lambda function: $LAMBDA_FUNCTION"
           
           # Get recent Lambda logs
           echo "Lambda Invoker logs (last 5 minutes):"
@@ -217,25 +233,48 @@ jobs:
           
           echo ""
           echo "📊 Checking ECS Service status..."
-          CLUSTER_NAME=$(terraform output -raw ecs_cluster_name 2>/dev/null || echo "cloud-custodian-cluster")
+          CLUSTER_NAME="${{ secrets.ECS_CLUSTER_NAME }}"
+          
+          if [ -z "$CLUSTER_NAME" ]; then
+            CLUSTER_NAME=$(aws ecs list-clusters --query "clusterArns[?contains(@, 'custodian')] | [0]" --output text --region ${{ env.AWS_REGION }} | awk -F'/' '{print $NF}')
+          fi
+          
+          echo "Using ECS cluster: $CLUSTER_NAME"
           
           # Check ECS Service
-          aws ecs describe-services \
-            --cluster "$CLUSTER_NAME" \
-            --services cloud-custodian-worker-production \
-            --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount}' \
-            --region ${{ env.AWS_REGION }} || echo "⚠️ ECS service not found or not running"
+          SERVICE_NAME=$(aws ecs list-services --cluster "$CLUSTER_NAME" --query "serviceArns[0]" --output text --region ${{ env.AWS_REGION }} | awk -F'/' '{print $NF}')
+          
+          if [ -n "$SERVICE_NAME" ] && [ "$SERVICE_NAME" != "None" ]; then
+            aws ecs describe-services \
+              --cluster "$CLUSTER_NAME" \
+              --services "$SERVICE_NAME" \
+              --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount}' \
+              --region ${{ env.AWS_REGION }} || echo "⚠️ ECS service not found or not running"
+          else
+            echo "⚠️ No ECS service found in cluster"
+          fi
           
           echo ""
           echo "📬 Checking SQS Queue..."
-          SQS_QUEUE_URL=$(terraform output -raw sqs_queue_url 2>/dev/null || echo "")
-          if [ -n "$SQS_QUEUE_URL" ]; then
-            aws sqs get-queue-attributes \
-              --queue-url "$SQS_QUEUE_URL" \
-              --attribute-names ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible \
-              --region ${{ env.AWS_REGION }}
+          QUEUE_NAME="${{ secrets.SQS_QUEUE_NAME }}"
+          
+          if [ -z "$QUEUE_NAME" ]; then
+            QUEUE_NAME=$(aws sqs list-queues --query "QueueUrls[?contains(@, 'custodian')] | [0]" --output text --region ${{ env.AWS_REGION }} | awk -F'/' '{print $NF}')
+          fi
+          
+          if [ -n "$QUEUE_NAME" ] && [ "$QUEUE_NAME" != "None" ]; then
+            SQS_QUEUE_URL=$(aws sqs get-queue-url --queue-name "$QUEUE_NAME" --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+            
+            if [ -n "$SQS_QUEUE_URL" ]; then
+              aws sqs get-queue-attributes \
+                --queue-url "$SQS_QUEUE_URL" \
+                --attribute-names ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible \
+                --region ${{ env.AWS_REGION }}
+            else
+              echo "⚠️ SQS queue URL not found"
+            fi
           else
-            echo "⚠️ SQS queue URL not found"
+            echo "⚠️ SQS queue not found"
           fi
       
       # ====================================================================

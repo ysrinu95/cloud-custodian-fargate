@@ -8,16 +8,26 @@ Implemented **ECS Service with auto-scaling that scales to zero** when idle. Con
 ## Architecture Flow
 
 ```
-EventBridge → Lambda (parse + select policy + queue to SQS) 
-                ↓
-            SQS Queue (messages accumulate)
-                ↓
-    Auto-Scaling detects messages → Scales ECS Service from 0 to N tasks
-                ↓
-    ECS Fargate Tasks (poll SQS + execute policies)
-                ↓
-    When queue empty → Tasks exit gracefully → Service scales back to 0
+Security Hub Findings → EventBridge → Lambda (parse + select policy + queue to SQS) 
+                                          ↓
+                                    SQS Queue (messages accumulate)
+                                          ↓
+                    Auto-Scaling detects messages → Scales ECS Service from 0 to N tasks
+                                          ↓
+                            ECS Fargate Tasks (poll SQS + execute policies)
+                                          ↓
+                When queue empty → Tasks exit gracefully → Service scales back to 0
 ```
+
+**Event Sources (Security Hub Only):**
+- Security Hub: Public S3 buckets, IAM violations, compliance failures
+- GuardDuty: Threat detection findings
+- Macie: Sensitive data discovery
+- Config: Compliance rule violations
+- Access Analyzer: Resource exposure findings
+
+**Note:** CloudTrail-based S3/EC2 event rules are disabled to prevent triggering on ALL API calls. 
+Only actual security findings from Security Hub trigger the pipeline.
 
 ---
 

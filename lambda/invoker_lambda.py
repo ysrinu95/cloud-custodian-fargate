@@ -1,7 +1,7 @@
 """
 Lightweight Invoker Lambda
-Receives security findings from EventBridge, dynamically selects appropriate policy,
-and sends to SQS for processing by auto-scaling ECS Service
+Receives security findings from EventBridge, validates if remediation is needed,
+dynamically selects appropriate policy, and sends to SQS for processing by auto-scaling ECS Service
 """
 
 import json
@@ -9,6 +9,9 @@ import boto3
 import os
 from datetime import datetime
 from typing import Dict, Any, Optional
+
+# Import validator factory
+from validators import ValidatorFactory
 
 sqs = boto3.client('sqs')
 s3 = boto3.client('s3')
@@ -27,8 +30,9 @@ _policy_mappings_cache = None
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    Handler that parses security findings, dynamically selects appropriate policy,
-    and sends to SQS. ECS Service auto-scales based on queue depth.
+    Handler that parses security findings, validates if remediation is needed,
+    dynamically selects appropriate policy, and sends to SQS.
+    ECS Service auto-scales based on queue depth.
     """
     print(f"Received event: {json.dumps(event)}")
     
@@ -40,9 +44,40 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             print("Could not parse security finding")
             return {'statusCode': 400, 'body': 'Invalid finding format'}
         
+        print(f"✓ Parsed finding: {finding.get('finding_id')} ({finding.get('resource_type')})")
+        
+        # **VALIDATION STEP: Check if remediation is actually needed**
+        validation_result = ValidatorFactory.validate_finding(finding)
+        
+        if not validation_result.get('is_valid', False):
+            # Validation failed - no remediation needed
+            reason = validation_result.get('reason', 'Unknown reason')
+            print(f"⊗ Validation failed: {reason}")
+            print(f"⊗ Skipping SQS queueing - no remediation required")
+            
+            # Publish metric for skipped findings
+            publish_skipped_metric(finding, reason)
+            
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'status': 'skipped',
+                    'finding_id': finding.get('finding_id'),
+                    'resource_type': finding.get('resource_type'),
+                    'reason': reason,
+                    'validation': validation_result
+                })
+            }
+        
+        # Validation passed - proceed with remediation
+        print(f"✓ Validation passed: {validation_result.get('reason')}")
+        
         # Enrich finding with additional context (optional)
         if ENABLE_ENRICHMENT:
             finding = enrich_finding(finding)
+        
+        # Add validation metadata to finding
+        finding['validation_result'] = validation_result
         
         # Dynamically select appropriate policy based on finding characteristics
         policy_key = select_policy_for_finding(finding)
@@ -68,18 +103,20 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Publish metrics
         publish_metrics(finding, policy_key)
         
-        print(f"Successfully queued finding {finding.get('finding_id')} with message ID {message_id}")
-        print(f"Policy configuration: s3://{POLICY_BUCKET}/{policy_key}")
-        print(f"ECS Service will auto-scale to process this message")
+        print(f"✓ Successfully queued finding {finding.get('finding_id')} with message ID {message_id}")
+        print(f"✓ Policy configuration: s3://{POLICY_BUCKET}/{policy_key}")
+        print(f"✓ ECS Service will auto-scale to process this message")
         
         return {
             'statusCode': 200,
             'body': json.dumps({
+                'status': 'queued',
                 'message_id': message_id,
                 'finding_id': finding.get('finding_id'),
                 'policy_bucket': POLICY_BUCKET,
                 'policy_key': policy_key,
-                'priority': priority
+                'priority': priority,
+                'validation': validation_result
             })
         }
         
@@ -431,6 +468,30 @@ def publish_metrics(finding: Dict[str, Any], policy_key: str) -> None:
     except Exception as e:
         print(f"Error publishing metrics: {str(e)}")
         # Don't fail the Lambda on metrics errors
+
+
+def publish_skipped_metric(finding: Dict[str, Any], reason: str) -> None:
+    """
+    Publish CloudWatch metric for skipped findings (validation failed)
+    """
+    try:
+        cloudwatch.put_metric_data(
+            Namespace='CloudCustodian/SecurityFindings',
+            MetricData=[
+                {
+                    'MetricName': 'FindingsSkipped',
+                    'Value': 1,
+                    'Unit': 'Count',
+                    'Dimensions': [
+                        {'Name': 'Source', 'Value': finding.get('source', 'unknown')},
+                        {'Name': 'ResourceType', 'Value': finding.get('resource_type', 'unknown')},
+                        {'Name': 'Reason', 'Value': 'ValidationFailed'},
+                    ]
+                }
+            ]
+        )
+    except Exception as e:
+        print(f"Error publishing skipped metric: {str(e)}")
 
 
 def load_policy_mappings() -> Dict[str, Any]:

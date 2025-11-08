@@ -326,6 +326,15 @@ resource "aws_iam_role_policy" "lambda_invoker" {
           var.enable_ecs_worker ? aws_iam_role.ecs_task_execution[0].arn : "",
           var.enable_ecs_worker ? aws_iam_role.ecs_task[0].arn : ""
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetPublicAccessBlock",
+          "s3:GetBucketAcl",
+          "s3:GetBucketPolicy"
+        ]
+        Resource = "*"
       }
     ]
   })
@@ -727,80 +736,84 @@ resource "aws_lambda_permission" "unified_security" {
 }
 
 # ============================================================================
-# EVENTBRIDGE RULE - S3 CloudTrail Events (for testing)
+# EVENTBRIDGE RULE - S3 CloudTrail Events (DISABLED - Using Security Hub)
+# ============================================================================
+# NOTE: These CloudTrail-based rules trigger on ALL S3/EC2 events, not just
+# security issues. Using Security Hub findings instead for cost efficiency.
+# Uncomment these rules only if you need real-time CloudTrail event processing.
 # ============================================================================
 
-resource "aws_cloudwatch_event_rule" "s3_events" {
-  name        = "${var.project_name}-s3-events"
-  description = "Capture S3 bucket creation and policy changes"
-  
-  event_pattern = jsonencode({
-    source      = ["aws.s3"]
-    detail-type = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventName = [
-        "CreateBucket",
-        "PutBucketPolicy",
-        "PutBucketAcl",
-        "DeleteBucketPolicy",
-        "PutBucketPublicAccessBlock"
-      ]
-    }
-  })
-  
-  tags = {
-    Name = "S3 Events Rule"
-  }
-}
+# resource "aws_cloudwatch_event_rule" "s3_events" {
+#   name        = "${var.project_name}-s3-events"
+#   description = "Capture S3 bucket creation and policy changes"
+#   
+#   event_pattern = jsonencode({
+#     source      = ["aws.s3"]
+#     detail-type = ["AWS API Call via CloudTrail"]
+#     detail = {
+#       eventName = [
+#         "CreateBucket",
+#         "PutBucketPolicy",
+#         "PutBucketAcl",
+#         "DeleteBucketPolicy",
+#         "PutBucketPublicAccessBlock"
+#       ]
+#     }
+#   })
+#   
+#   tags = {
+#     Name = "S3 Events Rule"
+#   }
+# }
 
-resource "aws_cloudwatch_event_target" "s3_events" {
-  rule      = aws_cloudwatch_event_rule.s3_events.name
-  target_id = "InvokerLambda"
-  arn       = aws_lambda_function.invoker.arn
-}
+# resource "aws_cloudwatch_event_target" "s3_events" {
+#   rule      = aws_cloudwatch_event_rule.s3_events.name
+#   target_id = "InvokerLambda"
+#   arn       = aws_lambda_function.invoker.arn
+# }
 
-resource "aws_lambda_permission" "s3_events" {
-  statement_id  = "AllowEventBridgeS3Invoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.invoker.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.s3_events.arn
-}
+# resource "aws_lambda_permission" "s3_events" {
+#   statement_id  = "AllowEventBridgeS3Invoke"
+#   action        = "lambda:InvokeFunction"
+#   function_name = aws_lambda_function.invoker.function_name
+#   principal     = "events.amazonaws.com"
+#   source_arn    = aws_cloudwatch_event_rule.s3_events.arn
+# }
 
 # ============================================================================
-# EVENTBRIDGE RULE - EC2 CloudTrail Events (for testing)
+# EVENTBRIDGE RULE - EC2 CloudTrail Events (DISABLED - Using Security Hub)
 # ============================================================================
 
-resource "aws_cloudwatch_event_rule" "ec2_events" {
-  name        = "${var.project_name}-ec2-events"
-  description = "Capture EC2 RunInstances events"
-  
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventName = ["RunInstances"]
-    }
-  })
-  
-  tags = {
-    Name = "EC2 Events Rule"
-  }
-}
+# resource "aws_cloudwatch_event_rule" "ec2_events" {
+#   name        = "${var.project_name}-ec2-events"
+#   description = "Capture EC2 RunInstances events"
+#   
+#   event_pattern = jsonencode({
+#     source      = ["aws.ec2"]
+#     detail-type = ["AWS API Call via CloudTrail"]
+#     detail = {
+#       eventName = ["RunInstances"]
+#     }
+#   })
+#   
+#   tags = {
+#     Name = "EC2 Events Rule"
+#   }
+# }
 
-resource "aws_cloudwatch_event_target" "ec2_events" {
-  rule      = aws_cloudwatch_event_rule.ec2_events.name
-  target_id = "InvokerLambda"
-  arn       = aws_lambda_function.invoker.arn
-}
+# resource "aws_cloudwatch_event_target" "ec2_events" {
+#   rule      = aws_cloudwatch_event_rule.ec2_events.name
+#   target_id = "InvokerLambda"
+#   arn       = aws_lambda_function.invoker.arn
+# }
 
-resource "aws_lambda_permission" "ec2_events" {
-  statement_id  = "AllowEventBridgeEC2Invoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.invoker.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.ec2_events.arn
-}
+# resource "aws_lambda_permission" "ec2_events" {
+#   statement_id  = "AllowEventBridgeEC2Invoke"
+#   action        = "lambda:InvokeFunction"
+#   function_name = aws_lambda_function.invoker.function_name
+#   principal     = "events.amazonaws.com"
+#   source_arn    = aws_cloudwatch_event_rule.ec2_events.arn
+# }
 
 # ============================================================================
 # OUTPUTS
