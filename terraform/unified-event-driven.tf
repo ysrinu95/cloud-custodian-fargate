@@ -606,11 +606,6 @@ resource "aws_ecs_service" "worker" {
     assign_public_ip = true  # Required for Fargate in public subnets
   }
   
-  deployment_configuration {
-    maximum_percent         = 200
-    minimum_healthy_percent = 100
-  }
-  
   enable_execute_command = true
   
   tags = {
