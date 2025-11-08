@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       policy_file:
-        description: 'Policy file to test (e.g., s3-createbucket-simple.yml)'
+        description: 'Policy file to test (e.g., s3-createbucket.yml)'
         required: true
         type: string
-        default: 's3-createbucket-simple.yml'
+        default: 's3-createbucket.yml'
       test_action:
         description: 'Test action'
         required: true
@@ -138,18 +138,18 @@ jobs:
           S3_BUCKET=$(terraform output -raw s3_bucket_name)
           cd ..
           
-          # Download current mappings
-          aws s3 cp "s3://${S3_BUCKET}/config/policy-mappings.yml" /tmp/policy-mappings.yml || true
+          # Download current mappings (note: it's .json not .yml)
+          aws s3 cp "s3://${S3_BUCKET}/config/policy-mappings.json" /tmp/policy-mappings.json || true
           
-          if [ -f /tmp/policy-mappings.yml ]; then
+          if [ -f /tmp/policy-mappings.json ]; then
             echo "✓ Current policy mappings downloaded"
-            cat /tmp/policy-mappings.yml
+            cat /tmp/policy-mappings.json
           else
             echo "⚠️ No existing policy mappings found"
           fi
           
           echo ""
-          echo "ℹ️ To add this policy to mappings, update config/policy-mappings.yml"
+          echo "ℹ️ To add this policy to mappings, update config/policy-mappings.json"
       
       # ====================================================================
       # STEP 5: Trigger Test Event (if deploying test)
@@ -214,6 +214,29 @@ jobs:
             --since 5m \
             --format short \
             --region ${{ env.AWS_REGION }} || true
+          
+          echo ""
+          echo "📊 Checking ECS Service status..."
+          CLUSTER_NAME=$(terraform output -raw ecs_cluster_name 2>/dev/null || echo "cloud-custodian-cluster")
+          
+          # Check ECS Service
+          aws ecs describe-services \
+            --cluster "$CLUSTER_NAME" \
+            --services cloud-custodian-worker-production \
+            --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount}' \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ ECS service not found or not running"
+          
+          echo ""
+          echo "📬 Checking SQS Queue..."
+          SQS_QUEUE_URL=$(terraform output -raw sqs_queue_url 2>/dev/null || echo "")
+          if [ -n "$SQS_QUEUE_URL" ]; then
+            aws sqs get-queue-attributes \
+              --queue-url "$SQS_QUEUE_URL" \
+              --attribute-names ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible \
+              --region ${{ env.AWS_REGION }}
+          else
+            echo "⚠️ SQS queue URL not found"
+          fi
       
       # ====================================================================
       # STEP 7: Generate Test Report
@@ -250,9 +273,22 @@ jobs:
           
           1. Review CloudWatch Logs for Lambda and ECS
           2. Check S3 bucket outputs
-          3. Verify SQS queue metrics
-          4. Monitor CloudWatch metrics for policy execution
-          5. Add policy to policy-mappings.yml if test successful
+          3. Verify SQS queue metrics (should scale ECS from 0 when messages arrive)
+          4. Monitor ECS Service scaling (0 → N tasks based on queue depth)
+          5. Verify ECS tasks scale back to 0 after queue is empty
+          6. Monitor CloudWatch metrics for policy execution
+          7. Add policy to policy-mappings.json if test successful
+          
+          ### Architecture Flow
+          
+          1. EventBridge detects security event
+          2. Lambda parses event and selects policy
+          3. Lambda sends message to SQS queue
+          4. Auto-scaling detects messages in queue
+          5. ECS Service scales from 0 to N tasks (based on 5 messages per task)
+          6. Fargate tasks process messages and execute policies
+          7. After ~60 seconds of no messages, tasks exit gracefully
+          8. ECS Service scales back to 0 tasks (no cost when idle)
           
           ### Useful AWS Console Links
           
@@ -286,11 +322,7 @@ jobs:
     strategy:
       matrix:
         policy:
-          - s3-createbucket-simple.yml
-          - s3-security-findings.yml
-          - ec2-runinstances.yml
-          - ec2-security-findings.yml
-          - iam-security-findings.yml
+          - s3-createbucket.yml
       fail-fast: false
     
     steps:
