@@ -308,6 +308,24 @@ resource "aws_iam_role_policy" "lambda_invoker" {
           "cloudwatch:PutMetricData"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:RunTask",
+          "ecs:DescribeTasks"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = [
+          var.enable_ecs_worker ? aws_iam_role.ecs_task_execution[0].arn : "",
+          var.enable_ecs_worker ? aws_iam_role.ecs_task[0].arn : ""
+        ]
       }
     ]
   })
@@ -335,6 +353,10 @@ resource "aws_lambda_function" "invoker" {
       POLICY_BUCKET        = aws_s3_bucket.custodian_bucket.id
       POLICY_MAPPING_KEY   = var.policy_mapping_key
       DEFAULT_POLICY_KEY   = var.policy_key
+      ECS_CLUSTER          = var.enable_ecs_worker ? aws_ecs_cluster.main[0].name : ""
+      ECS_TASK_DEFINITION  = var.enable_ecs_worker ? aws_ecs_task_definition.worker[0].family : ""
+      ECS_SUBNETS          = join(",", data.aws_subnets.default.ids)
+      ECS_SECURITY_GROUP   = var.enable_ecs_worker ? aws_security_group.ecs_worker[0].id : ""
     }
   }
   
@@ -566,28 +588,69 @@ resource "aws_ecs_task_definition" "worker" {
   }
 }
 
-# ============================================================================
-# ECS SERVICE
-# ============================================================================
-
-resource "aws_ecs_service" "worker" {
-  count           = var.enable_ecs_worker ? 1 : 0
-  name            = "${var.project_name}-worker"
-  cluster         = aws_ecs_cluster.main[0].id
-  task_definition = aws_ecs_task_definition.worker[0].arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
-  
-  network_configuration {
-    subnets          = data.aws_subnets.default.ids
-    assign_public_ip = true
-    security_groups  = [aws_security_group.ecs_worker[0].id]
+  # ECS Service with auto-scaling (scales to 0 when idle)
+  resource "aws_ecs_service" "worker" {
+    name            = "${var.project_name}-worker-${var.environment}"
+    cluster         = aws_ecs_cluster.custodian.id
+    task_definition = aws_ecs_task_definition.custodian_worker.arn
+    desired_count   = 0  # Start with 0 tasks, scale up based on SQS queue depth
+    launch_type     = "FARGATE"
+    
+    network_configuration {
+      subnets          = aws_subnet.private[*].id
+      security_groups  = [aws_security_group.fargate_worker.id]
+      assign_public_ip = true  # Required for Fargate in private subnet without NAT
+    }
+    
+    deployment_configuration {
+      maximum_percent         = 200
+      minimum_healthy_percent = 100
+    }
+    
+    enable_execute_command = true
+    
+    tags = {
+      Name        = "${var.project_name}-worker-${var.environment}"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+      Purpose     = "Auto-scaling worker for Cloud Custodian policies"
+    }
   }
   
-  tags = {
-    Name = "Worker Service"
+  # Application Auto Scaling Target
+  resource "aws_appautoscaling_target" "ecs_target" {
+    max_capacity       = 10  # Maximum number of tasks
+    min_capacity       = 0   # Can scale down to 0
+    resource_id        = "service/${aws_ecs_cluster.custodian.name}/${aws_ecs_service.worker.name}"
+    scalable_dimension = "ecs:service:DesiredCount"
+    service_namespace  = "ecs"
   }
-}
+  
+  # Auto Scaling Policy - Scale based on SQS Queue Depth
+  resource "aws_appautoscaling_policy" "ecs_policy_scale_up" {
+    name               = "${var.project_name}-scale-up-${var.environment}"
+    policy_type        = "TargetTrackingScaling"
+    resource_id        = aws_appautoscaling_target.ecs_target.resource_id
+    scalable_dimension = aws_appautoscaling_target.ecs_target.scalable_dimension
+    service_namespace  = aws_appautoscaling_target.ecs_target.service_namespace
+    
+    target_tracking_scaling_policy_configuration {
+      target_value       = 5.0  # Target 5 messages per task
+      scale_in_cooldown  = 300  # Wait 5 minutes before scaling down
+      scale_out_cooldown = 60   # Wait 1 minute before scaling up again
+      
+      customized_metric_specification {
+        metric_name = "ApproximateNumberOfMessagesVisible"
+        namespace   = "AWS/SQS"
+        statistic   = "Average"
+        
+        dimensions {
+          name  = "QueueName"
+          value = aws_sqs_queue.findings_queue.name
+        }
+      }
+    }
+  }
 
 # ============================================================================
 # SECURITY GROUP - ECS Worker

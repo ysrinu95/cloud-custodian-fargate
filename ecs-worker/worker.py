@@ -1,6 +1,7 @@
 """
 Fargate Worker Application
-Long-running process that polls SQS and executes Cloud Custodian policy
+Polls SQS queue and executes Cloud Custodian policies
+Gracefully shuts down when no messages (allows ECS Service to scale to 0)
 """
 
 import json
@@ -25,16 +26,18 @@ MAX_MESSAGES = int(os.environ.get('MAX_MESSAGES', '10'))
 WAIT_TIME_SECONDS = int(os.environ.get('WAIT_TIME_SECONDS', '20'))
 VISIBILITY_TIMEOUT = int(os.environ.get('VISIBILITY_TIMEOUT', '3600'))
 POLICY_BUCKET = os.environ.get('POLICY_BUCKET', 'aikyam-security-custodian-output')
-POLICY_KEY = os.environ.get('POLICY_KEY', 'policies/unified-security-policy.yml')
+MAX_EMPTY_RECEIVES = int(os.environ.get('MAX_EMPTY_RECEIVES', '3'))  # Scale down faster
 
 
 def main():
     """
-    Main worker loop - continuously poll SQS and process findings
+    Main worker loop - poll SQS and process findings
+    Gracefully exits after consecutive empty receives (allows auto-scaling to 0)
     """
     print(f"Starting Fargate worker at {datetime.utcnow().isoformat()}")
     print(f"SQS Queue: {SQS_QUEUE_URL}")
     print(f"Output Bucket: {OUTPUT_BUCKET}")
+    print(f"Max empty receives before shutdown: {MAX_EMPTY_RECEIVES}")
     
     # Health check
     if not SQS_QUEUE_URL:
@@ -42,7 +45,6 @@ def main():
         sys.exit(1)
     
     consecutive_empty_receives = 0
-    max_empty_receives = 10
     
     while True:
         try:
@@ -62,13 +64,14 @@ def main():
             
             if not messages:
                 consecutive_empty_receives += 1
-                print(f"No messages received (empty count: {consecutive_empty_receives}/{max_empty_receives})")
+                print(f"No messages received (empty count: {consecutive_empty_receives}/{MAX_EMPTY_RECEIVES})")
                 
-                # Graceful shutdown after prolonged inactivity
-                if consecutive_empty_receives >= max_empty_receives:
-                    print("No messages for extended period. Exiting gracefully for scale-down.")
+                # Graceful shutdown after consecutive empty receives
+                # This allows ECS Service to scale down to 0
+                if consecutive_empty_receives >= MAX_EMPTY_RECEIVES:
+                    print("No messages for extended period. Exiting gracefully to allow scale-down to 0.")
                     publish_worker_metrics(0, 0, 0)
-                    break
+                    sys.exit(0)
                 
                 continue
             
@@ -120,7 +123,7 @@ def main():
 def process_message(message: Dict[str, Any]) -> Dict[str, Any]:
     """
     Process a single SQS message containing a security finding
-    Executes a single unified Cloud Custodian policy
+    Downloads policy from S3 and executes Cloud Custodian
     """
     start_time = time.time()
     
@@ -141,12 +144,12 @@ def process_message(message: Dict[str, Any]) -> Dict[str, Any]:
         print(f"  Finding Type: {finding_type}")
         print(f"  Severity: {severity}")
         
-        # Get policy configuration from Lambda (or fallback to environment variables)
+        # Get policy configuration from Lambda
         policy_config = body.get('policy_config', {})
         policy_bucket = policy_config.get('policy_bucket', POLICY_BUCKET)
-        policy_key = policy_config.get('policy_key', POLICY_KEY)
+        policy_key = policy_config.get('policy_key', 'policies/s3-createbucket.yml')
         
-        print(f"  Policy location: s3://{policy_bucket}/{policy_key}")
+        print(f"  Policy: s3://{policy_bucket}/{policy_key}")
         
         # Download the policy file from S3
         local_policy_dir = '/tmp/policies'
@@ -154,7 +157,7 @@ def process_message(message: Dict[str, Any]) -> Dict[str, Any]:
         
         try:
             os.makedirs(local_policy_dir, exist_ok=True)
-            print(f"  Downloading policy from S3: s3://{policy_bucket}/{policy_key}")
+            print(f"  Downloading policy from S3...")
             s3.download_file(policy_bucket, policy_key, local_policy_path)
             print(f"  ✓ Policy downloaded: {local_policy_path}")
         except Exception as e:

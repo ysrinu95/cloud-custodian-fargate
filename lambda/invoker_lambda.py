@@ -1,6 +1,7 @@
 """
 Lightweight Invoker Lambda
-Receives security findings from EventBridge and dynamically selects appropriate policy
+Receives security findings from EventBridge, dynamically selects appropriate policy,
+and sends to SQS for processing by auto-scaling ECS Service
 """
 
 import json
@@ -26,7 +27,8 @@ _policy_mappings_cache = None
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    Handler that parses security findings and dynamically selects appropriate policy
+    Handler that parses security findings, dynamically selects appropriate policy,
+    and sends to SQS. ECS Service auto-scales based on queue depth.
     """
     print(f"Received event: {json.dumps(event)}")
     
@@ -60,7 +62,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Determine processing priority
         priority = get_priority(finding)
         
-        # Send to SQS
+        # Send to SQS (triggers ECS Service auto-scaling)
         message_id = send_to_sqs(finding, priority)
         
         # Publish metrics
@@ -68,6 +70,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         print(f"Successfully queued finding {finding.get('finding_id')} with message ID {message_id}")
         print(f"Policy configuration: s3://{POLICY_BUCKET}/{policy_key}")
+        print(f"ECS Service will auto-scale to process this message")
         
         return {
             'statusCode': 200,
