@@ -35,7 +35,6 @@ provider "aws" {
       Project     = var.project_name
       Environment = var.environment
       ManagedBy   = "terraform"
-      Framework   = "unified-event-driven"
     }
   }
 }
