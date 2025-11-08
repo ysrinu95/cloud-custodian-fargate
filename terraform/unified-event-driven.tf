@@ -153,31 +153,7 @@ resource "aws_s3_bucket_public_access_block" "custodian_bucket" {
 }
 
 # ============================================================================
-# OUTPUTS
-# ============================================================================
-
-output "s3_bucket_name" {
-  description = "S3 bucket for policies and outputs"
-  value       = aws_s3_bucket.custodian_bucket.id
-}
-
-output "s3_bucket_arn" {
-  description = "S3 bucket ARN"
-  value       = aws_s3_bucket.custodian_bucket.arn
-}
-
-output "aws_account_id" {
-  description = "AWS account ID"
-  value       = data.aws_caller_identity.current.account_id
-}
-
-output "aws_region" {
-  description = "AWS region"
-  value       = data.aws_region.current.name
-}
-
-# ============================================================================
-# REMOVED RESOURCES (All other infrastructure)
+# REMOVED RESOURCES SECTION (OLD COMMENT BLOCK)
 # ============================================================================
 # The following resources have been removed:
 # - SQS Queue and DLQ
