@@ -340,7 +340,7 @@ resource "aws_lambda_function" "invoker" {
   
   tags = {
     Name        = "Cloud Custodian Invoker"
-    Purpose     = "Parse events, load policy map, enqueue to SQS"
+    Purpose     = "Parse events and enqueue to SQS"
     Environment = var.environment
   }
 }
