@@ -658,10 +658,15 @@ resource "aws_appautoscaling_policy" "ecs_policy_scale_up" {
     scale_in_cooldown  = 300  # Wait 5 minutes before scaling down
     scale_out_cooldown = 60   # Wait 1 minute before scaling up again
     
-    # Use predefined metric instead of customized to avoid CloudWatch metrics delay
-    predefined_metric_specification {
-      predefined_metric_type = "SQSQueueMessagesVisible"
-      resource_label = "${aws_sqs_queue.custodian_queue.arn}"
+    customized_metric_specification {
+      metric_name = "ApproximateNumberOfMessagesVisible"
+      namespace   = "AWS/SQS"
+      statistic   = "Average"
+      
+      dimensions {
+        name  = "QueueName"
+        value = aws_sqs_queue.custodian_queue.name
+      }
     }
   }
 }
