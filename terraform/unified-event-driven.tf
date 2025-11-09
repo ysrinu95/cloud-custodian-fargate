@@ -864,15 +864,15 @@ output "eventbridge_rule_unified" {
   value       = aws_cloudwatch_event_rule.unified_security.name
 }
 
-output "eventbridge_rule_s3" {
-  description = "S3 EventBridge rule name"
-  value       = aws_cloudwatch_event_rule.s3_events.name
-}
+# output "eventbridge_rule_s3" {
+#   description = "S3 EventBridge rule name"
+#   value       = aws_cloudwatch_event_rule.s3_events.name
+# }
 
-output "eventbridge_rule_ec2" {
-  description = "EC2 EventBridge rule name"
-  value       = aws_cloudwatch_event_rule.ec2_events.name
-}
+# output "eventbridge_rule_ec2" {
+#   description = "EC2 EventBridge rule name"
+#   value       = aws_cloudwatch_event_rule.ec2_events.name
+# }
 
 output "aws_account_id" {
   description = "AWS account ID"
