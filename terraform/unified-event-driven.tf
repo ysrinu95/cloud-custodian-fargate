@@ -499,7 +499,12 @@ resource "aws_iam_role_policy" "ecs_task" {
           "ec2:CreateTags",
           "s3:GetBucket*",
           "s3:ListBucket*",
+          "s3:ListAllMyBuckets",
           "s3:DeleteBucket",
+          "s3:DeleteBucketPolicy",
+          "s3:DeleteBucketWebsite",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion",
           "s3:PutBucket*",
           "iam:List*",
           "iam:Get*"
