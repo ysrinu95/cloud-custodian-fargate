@@ -672,6 +672,130 @@ resource "aws_appautoscaling_policy" "ecs_policy_scale_up" {
 }
 
 # ============================================================================
+# LAMBDA - ECS SCALER (Immediate Scale-Out from Zero)
+# ============================================================================
+
+# IAM Role for ECS Scaler Lambda
+resource "aws_iam_role" "ecs_scaler_lambda" {
+  count = var.enable_ecs_worker ? 1 : 0
+  name  = "${var.project_name}-ecs-scaler-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# IAM Policy for ECS Scaler Lambda
+resource "aws_iam_policy" "ecs_scaler_lambda" {
+  count  = var.enable_ecs_worker ? 1 : 0
+  name   = "${var.project_name}-ecs-scaler-policy"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${var.project_name}-ecs-scaler-${var.environment}:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = aws_sqs_queue.custodian_queue.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:DescribeServices",
+          "ecs:UpdateService"
+        ]
+        Resource = aws_ecs_service.worker[0].id
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "ecs_scaler_lambda" {
+  count      = var.enable_ecs_worker ? 1 : 0
+  role       = aws_iam_role.ecs_scaler_lambda[0].name
+  policy_arn = aws_iam_policy.ecs_scaler_lambda[0].arn
+}
+
+# Lambda Function - ECS Scaler
+resource "aws_lambda_function" "ecs_scaler" {
+  count         = var.enable_ecs_worker ? 1 : 0
+  filename      = "${path.module}/../lambda/ecs-scaler-function.zip"
+  function_name = "${var.project_name}-ecs-scaler-${var.environment}"
+  role          = aws_iam_role.ecs_scaler_lambda[0].arn
+  handler       = "ecs_scaler.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 60
+  memory_size   = 128
+  
+  source_code_hash = filebase64sha256("${path.module}/../lambda/ecs-scaler-function.zip")
+  
+  environment {
+    variables = {
+      ECS_CLUSTER_NAME  = aws_ecs_cluster.main[0].name
+      ECS_SERVICE_NAME  = aws_ecs_service.worker[0].name
+      MIN_TASKS         = "0"
+      MAX_TASKS         = "10"
+      MESSAGES_PER_TASK = "5"
+    }
+  }
+  
+  tags = {
+    Name = "ECS Scaler Lambda"
+  }
+}
+
+# CloudWatch Log Group for ECS Scaler Lambda
+resource "aws_cloudwatch_log_group" "ecs_scaler" {
+  count             = var.enable_ecs_worker ? 1 : 0
+  name              = "/aws/lambda/${var.project_name}-ecs-scaler-${var.environment}"
+  retention_in_days = 7
+}
+
+# Lambda Event Source Mapping - Trigger on SQS Messages
+resource "aws_lambda_event_source_mapping" "ecs_scaler_sqs" {
+  count            = var.enable_ecs_worker ? 1 : 0
+  event_source_arn = aws_sqs_queue.custodian_queue.arn
+  function_name    = aws_lambda_function.ecs_scaler[0].arn
+  batch_size       = 1  # Process 1 message at a time for immediate response
+  enabled          = true
+  
+  # Only trigger when service is at 0 tasks (scaling from zero)
+  # Once tasks are running, they'll process the queue themselves
+  scaling_config {
+    maximum_concurrency = 2  # Limit concurrent executions
+  }
+}
+
+# ============================================================================
 # SECURITY GROUP - ECS Worker
 # ============================================================================
 
@@ -843,6 +967,16 @@ output "lambda_function_name" {
 output "lambda_function_arn" {
   description = "Lambda invoker function ARN"
   value       = aws_lambda_function.invoker.arn
+}
+
+output "ecs_scaler_function_name" {
+  description = "ECS scaler Lambda function name"
+  value       = var.enable_ecs_worker ? aws_lambda_function.ecs_scaler[0].function_name : null
+}
+
+output "ecs_scaler_function_arn" {
+  description = "ECS scaler Lambda function ARN"
+  value       = var.enable_ecs_worker ? aws_lambda_function.ecs_scaler[0].arn : null
 }
 
 output "ecr_repository_url" {
