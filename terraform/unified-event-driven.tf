@@ -115,7 +115,8 @@ data "aws_subnets" "default" {
 # ============================================================================
 
 resource "aws_s3_bucket" "custodian_bucket" {
-  bucket = "${var.project_name}-unified-${data.aws_caller_identity.current.account_id}"
+  bucket        = "${var.project_name}-unified-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
   
   tags = {
     Name        = "Cloud Custodian Unified Bucket"
@@ -210,6 +211,7 @@ resource "aws_ecr_repository" "worker" {
   count                = var.enable_ecs_worker ? 1 : 0
   name                 = "${var.project_name}-worker"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true
   
   image_scanning_configuration {
     scan_on_push = true
