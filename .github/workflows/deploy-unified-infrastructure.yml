@@ -36,6 +36,9 @@ jobs:
   deploy-infrastructure:
     name: Deploy Unified Infrastructure
     runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'))
     
     steps:
       - name: Checkout code
