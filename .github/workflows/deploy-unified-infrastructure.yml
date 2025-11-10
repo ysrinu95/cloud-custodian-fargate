@@ -58,20 +58,28 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       
       # ====================================================================
-      # STEP 1: Package Lambda Functions
+      # STEP 1: Package Lambda Functions (BEFORE Terraform Init)
       # ====================================================================
       - name: Package Lambda invoker function
         run: |
           cd lambda
           pip install -r requirements.txt -t .
           zip -r lambda-function.zip .
+          ls -lh lambda-function.zip
           echo "✓ Lambda invoker package created: lambda-function.zip"
       
       - name: Package Lambda ECS scaler function
         run: |
           cd lambda
           zip ecs-scaler-function.zip ecs_scaler.py
+          ls -lh ecs-scaler-function.zip
           echo "✓ Lambda ECS scaler package created: ecs-scaler-function.zip"
+      
+      - name: Verify Lambda artifacts exist
+        run: |
+          ls -lh lambda/lambda-function.zip
+          ls -lh lambda/ecs-scaler-function.zip
+          echo "✓ All Lambda artifacts verified"
       
       # ====================================================================
       # STEP 2: Terraform Init & Plan
