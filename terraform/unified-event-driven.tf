@@ -756,7 +756,7 @@ resource "aws_lambda_function" "ecs_scaler" {
   timeout       = 60
   memory_size   = 128
   
-  source_code_hash = filebase64sha256("${path.module}/../lambda/ecs-scaler-function.zip")
+  source_code_hash = try(filebase64sha256("${path.module}/../lambda/ecs-scaler-function.zip"), null)
   
   environment {
     variables = {
